@@ -70,22 +70,22 @@
                          res#)
                        (catch Throwable t#
                          (do
+                           (~tap-event! :exception)
                            (log/error t# "Unhandled exception occurred while executing function" f#)
                            (swap! ~fn-history-atom (partial add-fn-count :error (today-yyyy-MM-dd-utc) (str f#)))
-                           (deliver exception?# (ex-info (ex-message t#)
-                                                         (merge (ex-data t#)
-                                                                {::seen? true})
-                                                         t#))))
+                           (deliver exception?# t#)))
                        (finally
                          (swap! ~fn-history-atom update "running-threads" (fn [m#] (dissoc m# (.getName (Thread/currentThread))))))))
          fut# (future (bound-fn#))
          res# (try
                 (deref fut# timeout-ms# ::timeout)
                 (catch Throwable t#
+                  (~tap-event! :internal-error)
                   (log/error t# "defnlogged internal error. Should not happen. Error message:"
                              (ex-message t#))
                   (throw t#)))]
      (when (= res# ::timeout)
+       (~tap-event! :timeout)
        (deliver timeout?# true)
        (log/error
          (str "Function timed out. Fn: " f#
@@ -98,20 +98,28 @@
                          (doseq [ste# (into [] (.getStackTrace thread#))]
                            (st/print-trace-element ste#)
                            (println ""))))))))
-       (~tap-event! :timeout)
        (swap! ~fn-history-atom (partial add-fn-count :timeout (today-yyyy-MM-dd-utc) (str f#))))
      (cond (and (not= ::none default-val#)
                 (or (realized? exception?#)
                     (= res# ::timeout)))
-           default-val#
+           (do
+             (~tap-event! :default-val)
+             default-val#)
 
            (= res# ::timeout)
-           (throw (ex-info (str "Function timed out. Fn: " f#) {:fn f#}))
+           (do
+             (~tap-event! :timeout-throw)
+             (throw (ex-info (str "Function timed out. Fn: " f#) {:fn f#})))
 
            (realized? exception?#)
-           (throw @exception?#)
+           (do
+             (~tap-event! :throw)
+             (throw @exception?#))
 
-           :else res#)))
+           :else
+           (do
+             (~tap-event! :return-val)
+             res#))))
 
 (defn- fn-sigs [def? fn-sym sigs]
   (let [single-arity? (vector? (first sigs))
@@ -146,7 +154,15 @@
          attrs (conj attrs attrs-merge)]
      [(with-meta sym attrs) args])))
 
-(defmacro defnl "Like `defn` but adds logging of the function name if an uncaught exception occurs"
+(defmacro defnl
+  "A supercharged `defn` that:
+  * logs if an exception or timeout occurs.
+  *
+
+  attr-map? can be a map with the following keys:
+  :timeout (java.time.Duration/ofMinutes 5) ; if a number is used, milliseconds is assumed
+  :default-val :some-value
+  "
   {:arglists
    '([name doc-string? attr-map? [params*] prepost-map? body]
      [name doc-string? attr-map? ([params*] prepost-map? body) + attr-map?])}

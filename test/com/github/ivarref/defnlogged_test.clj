@@ -1,11 +1,25 @@
 (ns com.github.ivarref.defnlogged-test
   (:require [clojure.string :as str]
             [clojure.test :refer [deftest is use-fixtures]]
-            [clojure.tools.logging :as log]
             [com.github.ivarref.defnlogged :as d :refer [defnl]])
   (:import (java.time Duration)))
 
 (defonce events (atom #{}))
+
+(defn tap-event! [msg]
+  (swap! events conj msg))
+
+(defmacro has-event [e]
+  `(let [start-time# (System/currentTimeMillis)]
+     (while (and
+              (false? (contains? (deref events) ~e))
+              (let [diff-time# (- (System/currentTimeMillis) start-time#)]
+                (< diff-time# 3000)))
+       (Thread/sleep 10))
+     (is (contains? (deref events) ~e))))
+
+(defmacro not-has-event [e]
+  `(is (false? (contains? (deref events) ~e))))
 
 (defn setup! [f]
   (locking d/history
@@ -15,26 +29,29 @@
 
 (use-fixtures :each setup!)
 
-(defnl timeout-with-default-val
+(defnl timeout-with-default-val-fn
   {:timeout     (Duration/ofMillis 1)
-   :default-val :timeout}
+   :default-val :timeout
+   :tap-event!  tap-event!}
   []
   (Thread/sleep 1000)
   :normal-return)
 
-(defnl timeout-throws
-  {:timeout (Duration/ofMillis 1)}
+(defnl timeout-throws-fn
+  {:timeout    (Duration/ofMillis 1)
+   :tap-event! tap-event!}
   []
   (Thread/sleep 1000)
   :normal-return)
 
-(defnl exception-with-default-val
-  {:default-val :exception-default-value}
+(defnl exception-with-default-val-fn
+  {:default-val :exception-default-value
+   :tap-event!  tap-event!}
   []
   (/ 1 0))
 
-(defnl exception-throws
-  {}
+(defnl exception-throws-fn
+  {:tap-event! tap-event!}
   []
   (throw (ex-info "My exception" {})))
 
@@ -47,33 +64,34 @@
          (ex-message t#)))
      ~sub))
 
-(deftest basics
-  (is (= :timeout (timeout-with-default-val)))
-  (is (= :exception-default-value (exception-with-default-val)))
-  (is (ex-message-starts-with? (timeout-throws) "Function timed out."))
-  (is (ex-message-starts-with? (exception-throws) "My exception")))
+(defnl retval
+  {:tap-event! tap-event!}
+  [x]
+  x)
 
-(defn tap-event! [msg]
-  (swap! events conj msg))
+(deftest regular-return-value
+  (is (= nil (retval nil)))
+  (is (= 123 (retval 123)))
+  (has-event :return-val)
+  (not-has-event :internal-error))
 
-(defmacro has-event [e]
-  `(let [start-time# (System/currentTimeMillis)]
-     (while (and
-              (false? (contains? (deref events) ~e))
-              (let [diff-time# (- (System/currentTimeMillis) start-time#)]
-                (< diff-time# 5000)))
-       (Thread/sleep 10))
-     (is (contains? (deref events) ~e))))
-
-(defnl timeout-with-default-val-log
-  {:timeout     (Duration/ofMillis 1)
-   :default-val :timeout
-   :tap-event!  tap-event!}
-  []
-  (Thread/sleep 1000)
-  :normal-return)
-
-(deftest timeout-events
-  (is (= :timeout (timeout-with-default-val-log)))
+(deftest timeout-default-val
+  (is (= :timeout (timeout-with-default-val-fn)))
   (has-event :timeout)
-  (has-event :completion-after-timeout))
+  (has-event :completion-after-timeout)
+  (not-has-event :internal-error))
+
+(deftest exception-default-val
+  (is (= :exception-default-value (exception-with-default-val-fn)))
+  (has-event :exception)
+  (not-has-event :internal-error))
+
+(deftest timeout-throws
+  (is (ex-message-starts-with? (timeout-throws-fn) "Function timed out."))
+  (has-event :timeout-throw)
+  (not-has-event :internal-error))
+
+(deftest exception-throws
+  (is (ex-message-starts-with? (exception-throws-fn) "My exception"))
+  (has-event :throw)
+  (not-has-event :internal-error))
