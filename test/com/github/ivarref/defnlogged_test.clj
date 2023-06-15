@@ -95,3 +95,19 @@
   (is (ex-message-starts-with? (exception-throws-fn) "My exception"))
   (has-event :throw)
   (not-has-event :internal-error))
+
+(defnl default-val-can-be-nil
+  {:default-val nil}
+  []
+  (throw (ex-info "oh no" {})))
+
+(deftest default-val-can-be-nil-test
+  (is (= nil (default-val-can-be-nil))))
+
+(defnl no-tap-event
+  {}
+  [x]
+  x)
+
+(deftest no-tap-event-test
+  (is (= 123 (no-tap-event 123))))

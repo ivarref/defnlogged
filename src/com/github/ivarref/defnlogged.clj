@@ -2,7 +2,8 @@
   (:require [clojure.stacktrace :as st]
             [clojure.tools.logging :as log])
   (:import (java.time Duration ZoneId ZonedDateTime)
-           (java.time.format DateTimeFormatter)))
+           (java.time.format DateTimeFormatter)
+           (java.util.concurrent TimeoutException)))
 
 (defonce history (atom (sorted-map)))
 
@@ -46,7 +47,7 @@
     :or   {timeout         300000                           ; 5 minutes timeout
            default-val     ::none
            fn-history-atom `history
-           tap-event!      `identity}
+           tap-event!      `comment}
     :as   _attr-map} s1 body]
   `(let [f# (subs (str ~s1) 1)
          default-val# ~default-val
@@ -56,6 +57,7 @@
          thread# (promise)
          bound-fn# (bound-fn []
                      (try
+                       (~tap-event! :start)
                        (deliver thread# (Thread/currentThread))
                        (swap! ~fn-history-atom assoc-in ["running-threads" (.getName (Thread/currentThread))] (now-millis))
                        (let [start-time# (now-millis)
@@ -109,7 +111,7 @@
            (= res# ::timeout)
            (do
              (~tap-event! :timeout-throw)
-             (throw (ex-info (str "Function timed out. Fn: " f#) {:fn f#})))
+             (throw (TimeoutException. (str "Function timed out. Fn: " f#))))
 
            (realized? exception?#)
            (do
@@ -155,13 +157,36 @@
      [(with-meta sym attrs) args])))
 
 (defmacro defnl
-  "A supercharged `defn` that:
-  * logs if an exception or timeout occurs.
-  *
+  "defnl is a supercharged `defn` that:
+  * Logs if an exception or timeout occurs (at error level).
+  * Saves statistics about number of ok invocations,
+  exceptions and timeouts for each function.
 
   attr-map? can be a map with the following keys:
-  :timeout (java.time.Duration/ofMinutes 5) ; if a number is used, milliseconds is assumed
+
+  :timeout (java.time.Duration/ofMinutes 5)
+  ; If a number is used, milliseconds is assumed
+  ; The default timeout is 5 minutes.
+
   :default-val :some-value
+  ; If specified, this value will be returned if a timeout
+  ; or an exception occurs. `nil` is considered a specified
+  ; value.
+
+  ; If :default-val is unspecified, exceptions will be thrown.
+  ; If a timeout occurs an exception of type
+  ; java.util.concurrent.TimeoutException
+  ; will be thrown.
+
+  Example usage:
+  (defnl my-fn-wrapping-some-brittle-library
+    {:timeout (java.time.Duration/ofMinutes 1)
+     :default-val [] ; We don't want exceptions/timeouts to bubble up,
+                     ; and are happy with returning an empty vector
+                     ; in the case of exceptions/timeouts.
+     }
+    [my-args]
+    (some-lib/fn-doing-some-network-io-without-proper-timeouts my-args))
   "
   {:arglists
    '([name doc-string? attr-map? [params*] prepost-map? body]
