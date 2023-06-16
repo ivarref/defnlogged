@@ -30,7 +30,7 @@
 (use-fixtures :each setup!)
 
 (defnl timeout-with-default-val-fn
-  {:timeout     (Duration/ofMillis 1)
+  {:timeout-ms     (Duration/ofMillis 1)
    :default-val :timeout
    :tap-event!  tap-event!}
   []
@@ -38,7 +38,7 @@
   :normal-return)
 
 (defnl timeout-throws-fn
-  {:timeout    (Duration/ofMillis 1)
+  {:timeout-ms    (Duration/ofMillis 1)
    :tap-event! tap-event!}
   []
   (Thread/sleep 1000)
@@ -111,3 +111,23 @@
 
 (deftest no-tap-event-test
   (is (= 123 (no-tap-event 123))))
+
+(defmacro swallow [& body]
+  `(try
+     ~@body
+     (is (= "Expected an exception" "Got nothing"))
+     (catch Throwable t#
+       (is (= 1 1)))))
+
+(deftest stat-test
+  (with-redefs [d/today-yyyy-MM-dd-utc (fn [& _args] "2000-01-01")]
+    (no-tap-event :demo)
+    (swallow (exception-throws-fn))
+    (swallow (exception-throws-fn))
+    (swallow (timeout-throws-fn))
+    (exception-with-default-val-fn)
+    (is (= {"error" {"2000-01-01" {"com.github.ivarref.defnlogged-test/exception-throws-fn"           2
+                                   "com.github.ivarref.defnlogged-test/exception-with-default-val-fn" 1
+                                   "com.github.ivarref.defnlogged-test/timeout-throws-fn"             1}}
+            "ok"    {"2000-01-01" {"com.github.ivarref.defnlogged-test/no-tap-event" 1}}}
+           (d/fn-stats)))))

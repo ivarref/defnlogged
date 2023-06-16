@@ -1,6 +1,7 @@
 (ns com.github.ivarref.defnlogged
   (:require [clojure.stacktrace :as st]
-            [clojure.tools.logging :as log])
+            [clojure.tools.logging :as log]
+            [clojure.walk :as walk])
   (:import (java.time Duration ZoneId ZonedDateTime)
            (java.time.format DateTimeFormatter)
            (java.util.concurrent TimeoutException)))
@@ -40,18 +41,18 @@
   (System/currentTimeMillis))
 
 (defn- logged-defn
-  [{:keys [timeout
+  [{:keys [timeout-ms
            default-val
            fn-history-atom
            tap-event!]
-    :or   {timeout         300000                           ; 5 minutes timeout
+    :or   {timeout-ms      300000                           ; 5 minutes timeout
            default-val     ::none
            fn-history-atom `history
            tap-event!      `comment}
     :as   _attr-map} s1 body]
   `(let [f# (subs (str ~s1) 1)
          default-val# ~default-val
-         timeout-ms# (coerce-to-millis ~timeout)
+         timeout-ms# (coerce-to-millis ~timeout-ms)
          exception?# (promise)
          timeout?# (promise)
          thread# (promise)
@@ -68,13 +69,13 @@
                              (log/error "Function" (str f#) "was timed out, but finished after"
                                         (- (now-millis) start-time#)
                                         "milliseconds"))
-                           (swap! ~fn-history-atom (partial add-fn-count :ok (today-yyyy-MM-dd-utc) (str f#))))
+                           (swap! ~fn-history-atom (partial add-fn-count "ok" (today-yyyy-MM-dd-utc) (str f#))))
                          res#)
                        (catch Throwable t#
                          (do
                            (~tap-event! :exception)
                            (log/error t# "Unhandled exception occurred while executing function" f#)
-                           (swap! ~fn-history-atom (partial add-fn-count :error (today-yyyy-MM-dd-utc) (str f#)))
+                           (swap! ~fn-history-atom (partial add-fn-count "error" (today-yyyy-MM-dd-utc) (str f#)))
                            (deliver exception?# t#)))
                        (finally
                          (swap! ~fn-history-atom update "running-threads" (fn [m#] (dissoc m# (.getName (Thread/currentThread))))))))
@@ -89,6 +90,7 @@
      (when (= res# ::timeout)
        (~tap-event! :timeout)
        (deliver timeout?# true)
+       (swap! ~fn-history-atom (partial add-fn-count "error" (today-yyyy-MM-dd-utc) (str f#)))
        (log/error
          (str "Function timed out. Fn: " f#
               (when (realized? thread#)
@@ -99,8 +101,7 @@
                        (with-out-str
                          (doseq [ste# (into [] (.getStackTrace thread#))]
                            (st/print-trace-element ste#)
-                           (println ""))))))))
-       (swap! ~fn-history-atom (partial add-fn-count :timeout (today-yyyy-MM-dd-utc) (str f#))))
+                           (println "")))))))))
      (cond (and (not= ::none default-val#)
                 (or (realized? exception?#)
                     (= res# ::timeout)))
@@ -159,14 +160,13 @@
 (defmacro defnl
   "defnl is a supercharged `defn` that:
   * Logs if an exception or timeout occurs (at error level).
-  * Saves statistics about number of ok invocations,
-  exceptions and timeouts for each function.
+  * Saves statistics about number of ok and erroneous invocations for each function.
 
   attr-map? can be a map with the following keys:
 
-  :timeout (java.time.Duration/ofMinutes 5)
-  ; If a number is used, milliseconds is assumed
-  ; The default timeout is 5 minutes.
+  :timeout-ms 60000
+  ; The default timeout is 5 minutes (300 000 milliseconds).
+  ; java.time.Duration is also supported.
 
   :default-val :some-value
   ; If specified, this value will be returned if a timeout
@@ -180,7 +180,7 @@
 
   Example usage:
   (defnl my-fn-wrapping-some-brittle-library
-    {:timeout (java.time.Duration/ofMinutes 1)
+    {:timeout-ms 60000 ; java.time.Duration is also supported, e.g.: (java.time.Duration/ofMinutes 1)
      :default-val [] ; We don't want exceptions/timeouts to bubble up,
                      ; and are happy with returning an empty vector
                      ; in the case of exceptions/timeouts.
@@ -195,3 +195,20 @@
   (let [[fn-sym sigs] (name-with-attrs (first sigs) (next sigs))
         new-sigs (fn-sigs :def fn-sym sigs)]
     `(clojure.core/defn ~fn-sym ~@new-sigs)))
+
+(defn fn-stats []
+  (let [data (get @history "fn")]
+    (walk/postwalk
+      (fn [x]
+        (if (map? x)
+          (into (sorted-map) x)
+          x))
+      (reduce (fn [o v] (assoc-in o (butlast v) (last v)))
+              {}
+              (for [[date m] data
+                    [cmd-result stat-map] m
+                    [fn-name cnt] stat-map]
+                [cmd-result date fn-name cnt])))))
+
+(comment
+  (fn-stats))
